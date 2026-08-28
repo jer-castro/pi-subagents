@@ -104,6 +104,7 @@ export class FleetList {
   private timer: ReturnType<typeof setInterval> | undefined;
 
   private enabled = true;
+  private inputPaused = false;
   /** Whether arrow keys currently navigate the list (vs. flow to the editor). */
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
@@ -153,6 +154,16 @@ export class FleetList {
     this.enabled = enabled;
     if (!enabled) this.active = false;
     this.update();
+  }
+
+  setInputPaused(paused: boolean): void {
+    if (paused === this.inputPaused) return;
+    this.inputPaused = paused;
+    if (paused) {
+      this.active = false;
+      this.selectedIndex = 0;
+      this.update();
+    }
   }
 
   /** Capture the UI context and (re)register the global input handler. */
@@ -306,7 +317,7 @@ export class FleetList {
 
   /** Returns `{consume:true}` to swallow a key, or undefined to let it through. */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
-    if (!this.enabled || !this.ui) return undefined;
+    if (!this.enabled || !this.ui || this.inputPaused) return undefined;
     // Input listeners receive BOTH key-press and key-release (the kitty protocol
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.

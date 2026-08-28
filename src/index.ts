@@ -759,6 +759,9 @@ export default function (pi: ExtensionAPI) {
   // (currentCtx would stay undefined → spawn always "No active session"). Gating
   // here makes a filtered session behave like an absent one (#142).
   let rpcHandle: RpcHandle | undefined;
+  let askUserQuestionActive = 0;
+  let unsubAskUserQuestionStart: (() => void) | undefined;
+  let unsubAskUserQuestionEnd: (() => void) | undefined;
   /** Whether the `@handle` autocomplete wrapper has been stacked on pi's provider. */
   let mentionProviderRegistered = false;
 
@@ -820,6 +823,14 @@ export default function (pi: ExtensionAPI) {
             return true;
           },
         },
+      });
+      unsubAskUserQuestionStart = pi.events.on("ask-user-question:start", () => {
+        askUserQuestionActive++;
+        fleet.setInputPaused(true);
+      });
+      unsubAskUserQuestionEnd = pi.events.on("ask-user-question:end", () => {
+        askUserQuestionActive = Math.max(0, askUserQuestionActive - 1);
+        fleet.setInputPaused(askUserQuestionActive > 0);
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
@@ -1100,6 +1111,12 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle = undefined;
+    unsubAskUserQuestionStart?.();
+    unsubAskUserQuestionEnd?.();
+    unsubAskUserQuestionStart = undefined;
+    unsubAskUserQuestionEnd = undefined;
+    askUserQuestionActive = 0;
+    fleet.setInputPaused(false);
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
