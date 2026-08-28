@@ -25,6 +25,19 @@ import subagentsExtension from "../src/index.js";
 function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
+  const bus = new Map<string, Set<(data: unknown) => void>>();
+  const emit = vi.fn((event: string, data: unknown) => {
+    for (const handler of bus.get(event) ?? []) handler(data);
+  });
+  const onEvent = vi.fn((event: string, handler: (data: unknown) => void) => {
+    let handlers = bus.get(event);
+    if (!handlers) {
+      handlers = new Set();
+      bus.set(event, handlers);
+    }
+    handlers.add(handler);
+    return () => handlers.delete(handler);
+  });
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
@@ -33,7 +46,7 @@ function makePi() {
     registerFlag: vi.fn(),
     getFlag: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+    events: { emit, on: onEvent },
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
@@ -42,11 +55,18 @@ function makePi() {
 
 /** A UI context with the surfaces the widget + fleet touch; setWidget is spied. */
 function uiCtx() {
+  let inputHandler: ((data: string) => { consume?: boolean; data?: string } | undefined) | undefined;
   return {
     setStatus: vi.fn(),
     setWidget: vi.fn(),
     notify: vi.fn(),
-    onTerminalInput: vi.fn(() => vi.fn()),
+    onTerminalInput: vi.fn((handler: (data: string) => { consume?: boolean; data?: string } | undefined) => {
+      inputHandler = handler;
+      return () => {
+        if (inputHandler === handler) inputHandler = undefined;
+      };
+    }),
+    handleTerminalInput: (data: string) => inputHandler?.(data),
     getEditorText: vi.fn(() => ""),
     custom: vi.fn(),
   };
@@ -140,5 +160,44 @@ describe("FleetView wiring (real extension lifecycle)", () => {
 
     await lifecycle.get("session_shutdown")?.({}, ctxWith(uiCtx()));
     expect(ui.setWidget).toHaveBeenCalledWith("fleet", undefined); // dispose cleared it
+  });
+
+  it("lets ask_user_question own navigation keys while active", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const ui = uiCtx();
+    await lifecycle.get("session_start")?.({}, ctxWith(ui));
+    await lifecycle.get("tool_execution_start")?.({}, ctxWith(ui));
+    await tools.get("Agent").execute(
+      "tc",
+      { prompt: "go", description: "live one", subagent_type: "general-purpose", run_in_background: true },
+      undefined,
+      undefined,
+      ctxWith(uiCtx()),
+    );
+    await flush();
+
+    const DOWN = "\x1b[B";
+    const UP = "\x1b[A";
+    const LEFT = "\x1b[D";
+    const RIGHT = "\x1b[C";
+    const ENTER = "\r";
+    expect(ui.handleTerminalInput(DOWN)).toEqual({ consume: true });
+
+    pi.events.emit("ask-user-question:start", { questionCount: 1 });
+    for (const key of [UP, DOWN, LEFT, RIGHT, ENTER]) {
+      expect(ui.handleTerminalInput(key)).toBeUndefined();
+    }
+
+    pi.events.emit("ask-user-question:end", { questionCount: 1 });
+    expect(ui.handleTerminalInput(DOWN)).toEqual({ consume: true });
   });
 });
