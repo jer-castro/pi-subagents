@@ -47,6 +47,9 @@ export const SUBAGENT_TOOL_NAMES = {
 /** Names of tools registered by this extension that subagents must NOT inherit. */
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
+/** Safety policy loaded for every subagent that can invoke the bash tool. */
+const DCG_POLICY_EXTENSION_NAME = "dcg-guard";
+
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.
  * Lowercased — extension names match case-insensitively so `extensions: [Mcp]`
@@ -632,7 +635,8 @@ export async function runAgent(
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
 
-  // Resolve extensions/skills: isolated overrides to false
+  // Resolve feature extensions/skills: isolated overrides to false. Mandatory
+  // safety-policy extensions are added separately below.
   const extensions = options.isolated ? false : config.extensions;
   // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
   // isolation is an intentional override, not a misconfiguration.
@@ -688,9 +692,15 @@ export async function runAgent(
 
   const agentDir = getAgentDir();
 
+  const disallowedSet = agentConfig?.disallowedTools
+    ? new Set(agentConfig.disallowedTools)
+    : undefined;
+  const requiresDcgPolicy = toolNames.includes("bash") && !disallowedSet?.has("bash");
+
   // Extension loading:
   // - true  → all default-discovered extensions
-  // - false → none (noExtensions)
+  // - false → no feature extensions (`noExtensions` still admits explicit
+  //   mandatory policy paths such as dcg-guard)
   // - string[] → loader-level allowlist. Bare names keep the matching
   //   default-discovered extension; path entries load that extension fresh;
   //   "*" keeps all default-discovered extensions. Excluded extensions never
@@ -714,7 +724,9 @@ export async function runAgent(
     ? parseExtensionsSpec(extensions, configCwd)
     : undefined;
   const keepNames = extensionsSpec?.names ?? new Set<string>();
-  // `exclude_extensions:` is a denylist applied AFTER the include set — exclude wins.
+  if (requiresDcgPolicy) keepNames.add(DCG_POLICY_EXTENSION_NAME);
+  // `exclude_extensions:` is a denylist applied AFTER the include set — exclude wins
+  // for feature extensions. Mandatory policy extensions cannot be excluded.
   // Plain canonical names only (case-insensitive). Note: excluded extensions'
   // factories still run once during reload() (see comment above) — exclusion
   // suppresses handler binding and tool registration; it is not a sandbox.
@@ -724,7 +736,10 @@ export async function runAgent(
   // It's only needed when we're neither loading everything without excludes
   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  const additionalExtensionPaths = [
+    ...(requiresDcgPolicy ? [join(agentDir, "extensions", `${DCG_POLICY_EXTENSION_NAME}.ts`)] : []),
+    ...(extensionsSpec?.paths ?? []),
+  ];
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
@@ -738,6 +753,7 @@ export async function runAgent(
             ...base,
             extensions: base.extensions.filter((e) => {
               const canons = extensionCanonicalNames(e.path);
+              if (requiresDcgPolicy && canons.includes(DCG_POLICY_EXTENSION_NAME)) return true;
               if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
               return loadAll || canons.some((n) => keepNames.has(n));
             }),
@@ -748,7 +764,7 @@ export async function runAgent(
     cwd: configCwd,
     agentDir,
     noExtensions,
-    additionalExtensionPaths,
+    additionalExtensionPaths: additionalExtensionPaths.length > 0 ? additionalExtensionPaths : undefined,
     extensionsOverride,
     noSkills,
     noPromptTemplates: true,
@@ -758,6 +774,18 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await runInChildSessionContext(() => loader.reload());
+
+  if (
+    requiresDcgPolicy &&
+    !loader.getExtensions().extensions.some((extension: { path: string }) =>
+      extensionCanonicalNames(extension.path).includes(DCG_POLICY_EXTENSION_NAME))
+  ) {
+    const diagnostic = loader.getExtensions().errors.find((error: { path: string; error: string }) =>
+      extensionCanonicalNames(error.path).includes(DCG_POLICY_EXTENSION_NAME));
+    throw new Error(
+      `Required policy extension "${DCG_POLICY_EXTENSION_NAME}" failed to load${diagnostic ? `: ${diagnostic.error}` : "."}`,
+    );
+  }
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -783,12 +811,12 @@ export async function runAgent(
   //   - `tools: ext:foo` but foo isn't in the loaded set (because `extensions:`
   //     didn't include it). Since v0.9, `ext:` no longer pulls extensions in;
   //     loading is `extensions:`-authoritative.
-  // An exclude_extensions: alongside extensions: false is contradictory — nothing
-  // loads, so there is nothing to exclude.
+  // An exclude_extensions: alongside extensions: false is contradictory — no
+  // feature extensions load, so there is nothing user-configurable to exclude.
   if (hasExcludes && noExtensions) {
     options.onToolActivity?.({
       type: "end",
-      toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads nothing`,
+      toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads no feature extensions`,
     });
   }
   // Exclude typo check: compares against the PRE-filter discovered set (an excluded
@@ -835,10 +863,6 @@ export async function runAgent(
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
-
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
 
   // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
   // set `allowed_subagents` and a nestedRuntime was provided — and never when

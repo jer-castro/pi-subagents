@@ -23,7 +23,7 @@
  * provider registers in a different `pi-ai` module instance than the one
  * pi-coding-agent streams through, which is brittle and orthogonal to gating.)
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,17 +51,32 @@ function makePi() {
 
 describe("agent-runner end-to-end (real pi-mono session + real extension)", () => {
   let cwd: string;
+  let hermeticDir: string;
+  let prevAgentDir: string | undefined;
+  let prevHome: string | undefined;
   let faux: ReturnType<typeof registerFauxProvider>;
 
   beforeEach(() => {
     cwd = mkdtempSync(join(tmpdir(), "subagents-e2e-"));
+    hermeticDir = mkdtempSync(join(tmpdir(), "subagents-e2e-agent-"));
+    prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+    prevHome = process.env.HOME;
+    process.env.PI_CODING_AGENT_DIR = hermeticDir;
+    process.env.HOME = hermeticDir;
+    mkdirSync(join(hermeticDir, "extensions"), { recursive: true });
+    writeFileSync(join(hermeticDir, "extensions", "dcg-guard.ts"), "export default function dcgGuard() {}\n");
     // Only used as a valid Model object for createAgentSession; we never rely
     // on it actually streaming (we assert on the pre-prompt gated tool set).
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
   });
   afterEach(() => {
     faux.unregister();
+    if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+    if (prevHome == null) delete process.env.HOME;
+    else process.env.HOME = prevHome;
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(hermeticDir, { recursive: true, force: true });
   });
 
   /**

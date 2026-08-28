@@ -41,7 +41,7 @@
  * what you register in `beforeRun` and which `subagent_type` the `Agent` call
  * names. See `test/subagents-print-mode-e2e.test.ts` for usage.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -273,6 +273,8 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     hermeticDir = mkdtempSync(join(tmpdir(), "subagents-print-home-"));
     process.env.PI_CODING_AGENT_DIR = hermeticDir;
     process.env.HOME = hermeticDir;
+    mkdirSync(join(hermeticDir, "extensions"), { recursive: true });
+    writeFileSync(join(hermeticDir, "extensions", "dcg-guard.ts"), "export default function dcgGuard() {}\n");
   }
 
   // --- model backend ---

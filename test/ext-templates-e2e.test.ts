@@ -23,7 +23,7 @@
  * paths resolve and the .mjs fixtures can import `@sinclair/typebox` from the
  * repo's node_modules.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,6 +79,9 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
     prevHome = process.env.HOME;
     process.env.PI_CODING_AGENT_DIR = hermeticDir;
     process.env.HOME = hermeticDir;
+    mkdirSync(join(hermeticDir, "extensions"), { recursive: true });
+    // Overlay: dcg-guard is required whenever a subagent can invoke bash.
+    writeFileSync(join(hermeticDir, "extensions", "dcg-guard.ts"), "export default function dcgGuard() {}\n");
 
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
 

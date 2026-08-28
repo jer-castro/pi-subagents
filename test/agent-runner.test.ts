@@ -7,6 +7,7 @@ const {
   createAgentSession,
   defaultResourceLoaderCtor,
   loaderExtensionsRef,
+  failedAdditionalPaths,
   getAgentDir,
   sessionManagerInMemory,
   sessionManagerCreate,
@@ -23,6 +24,7 @@ const {
       runtime: Record<string, unknown>;
     },
   },
+  failedAdditionalPaths: new Set<string>(),
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
@@ -47,13 +49,26 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
 
     async reload() {
-      // Mirror the real loader: `noExtensions: true` zeros out the discovered set
-      // entirely. Otherwise tests pre-register the extensions a path should
-      // resolve to; an unregistered path simply yields no extension (a failed load).
-      if (this.opts.noExtensions) {
-        loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
-        return;
+      const additionalPaths = new Set<string>(this.opts.additionalExtensionPaths ?? []);
+      const additionalExtensions: Array<{ path: string; tools: Map<string, unknown> }> = [];
+      for (const path of additionalPaths) {
+        const alreadyLoaded = loaderExtensionsRef.current.extensions.find(
+          (extension: { path: string }) => extension.path === path,
+        );
+        if (failedAdditionalPaths.has(path) || (!alreadyLoaded && path !== "/mock/agent-dir/extensions/dcg-guard.ts")) {
+          loaderExtensionsRef.current.errors.push({ path, error: "synthetic load failure" });
+        } else {
+          additionalExtensions.push(alreadyLoaded ?? { path, tools: new Map() });
+        }
       }
+      const discoveredExtensions = loaderExtensionsRef.current.extensions.filter(
+        (extension: { path: string }) => !additionalPaths.has(extension.path),
+      );
+      // Mirror the real loader: explicit paths are ordered before default discovery;
+      // `noExtensions: true` suppresses only the default-discovered set.
+      loaderExtensionsRef.current.extensions = this.opts.noExtensions
+        ? additionalExtensions
+        : [...additionalExtensions, ...discoveredExtensions];
       if (this.opts.extensionsOverride) {
         loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
       }
@@ -214,6 +229,7 @@ beforeEach(() => {
   settingsManagerCreate.mockClear();
   vi.mocked(createNestedSubagentTools).mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
+  failedAdditionalPaths.clear();
   lastSession = undefined;
 });
 
@@ -757,6 +773,7 @@ import {
 import { createNestedSubagentTools } from "../src/nested-tools.js";
 
 const BUILTINS_7 = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const DCG_POLICY_PATH = "/mock/agent-dir/extensions/dcg-guard.ts";
 
 function makeAgentConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -1844,7 +1861,7 @@ describe("agent-runner extension allowlist", () => {
 
     const opts = lastLoaderOpts();
     expect(opts.extensionsOverride).toBeUndefined();
-    expect(opts.additionalExtensionPaths).toBeUndefined();
+    expect(opts.additionalExtensionPaths).toEqual([DCG_POLICY_PATH]);
     expect(lastToolsPassed()).toContain("tool_a");
   });
 
@@ -1902,7 +1919,7 @@ describe("agent-runner extension allowlist", () => {
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/abs/foo.ts"]);
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual([DCG_POLICY_PATH, "/abs/foo.ts"]);
     expect(lastToolsPassed()).toContain("foo_tool");
   });
 
@@ -1937,7 +1954,7 @@ describe("agent-runner extension allowlist", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     const opts = lastLoaderOpts();
-    expect(opts.additionalExtensionPaths).toEqual(["/abs/foo.ts"]);
+    expect(opts.additionalExtensionPaths).toEqual([DCG_POLICY_PATH, "/abs/foo.ts"]);
     // No "*" → the loader override is in force (narrowing, not load-all).
     expect(opts.extensionsOverride).toBeDefined();
     const tools = lastToolsPassed();
@@ -2125,6 +2142,60 @@ describe("agent-runner exclude_extensions", () => {
 
     expect(lastToolsPassed()).not.toContain("notify_send");
     expect(extensionErrors(onToolActivity)).toEqual([]);
+  });
+
+  it("mandatory DCG policy cannot be removed through exclude_extensions", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["dcg-guard"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(loaderExtensionsRef.current.extensions.map((extension: { path: string }) => extension.path)).toContain(
+      DCG_POLICY_PATH,
+    );
+  });
+
+  it("extensions: false retains the mandatory DCG policy when bash is available", async () => {
+    setupAgent({ extensions: false });
+    withExtensions({ "/ext/feature.ts": ["feature_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastLoaderOpts()).toMatchObject({
+      noExtensions: true,
+      additionalExtensionPaths: [DCG_POLICY_PATH],
+    });
+    expect(loaderExtensionsRef.current.extensions.map((extension: { path: string }) => extension.path)).toEqual([
+      DCG_POLICY_PATH,
+    ]);
+    expect(lastToolsPassed()).toEqual(BUILTINS_7);
+  });
+
+  it("isolated mode retains the mandatory DCG policy when bash is available", async () => {
+    setupAgent({ extensions: true });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, isolated: true });
+
+    expect(lastLoaderOpts()).toMatchObject({
+      noExtensions: true,
+      additionalExtensionPaths: [DCG_POLICY_PATH],
+    });
+    expect(lastToolsPassed()).toEqual(BUILTINS_7);
+  });
+
+  it("fails closed before session creation when the mandatory DCG policy cannot load", async () => {
+    setupAgent({ extensions: false });
+    failedAdditionalPaths.add(DCG_POLICY_PATH);
+
+    await expect(runAgent(ctx, "Explore", "go", { pi })).rejects.toThrow(
+      'Required policy extension "dcg-guard" failed to load: synthetic load failure',
+    );
+    expect(createAgentSession).not.toHaveBeenCalled();
   });
 
   it("tools: ext:foo referencing an excluded extension — existing orphan warning fires", async () => {
