@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
+- **`@sinclair/typebox` and `typebox` are peers (`*`), not dependencies.** Pi supplies both and maps extension imports onto its own copy. Listing them under `dependencies` made Pi install a second copy next to the extension, which it warns can bypass that mapping and duplicate the runtime module. Dev installs still pin `^0.34.49` and `^1.3.7` so typecheck and tests resolve without a host.
 
 ## [0.19.0] - 2026-08-25
 
